@@ -10,7 +10,7 @@ import NameCollector.*;
 
 /**
  * Code Geneartor turns processJ code to equivalent C code using using
- * parse tree by visiting each node. It then recusively builds the program
+n * parse tree by visiting each node. It then recusively builds the program
  * through recursion returning strings rendered by the string template.
  * Notice sometimes we return String[] if there is multiple statements.
  * General rules of thumb:
@@ -43,26 +43,36 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
    */
   private Hashtable<String, Integer> parBlockStmtCounts;
   /**
-   * We must know when we are inside a ParBlock as this means we have to do eveything
+   * Very similar to the table above. A parallel for must exist inside of a function.
+   * The inside of the parallel for must be wrapped in a function as it will run in
+   * parallel throug a call to CCSP. Therefore we guarantee this wrapper function will
+   * have a unique name in case of multiple par fors in a function. The names will always
+   * be of the form: <NameOfFunction>ParForStmt<counterValue>.
+   */
+  private Hashtable<String, Integer> parForStmtCounts;
+  /**
+   * We must know when we are inside a par as this means we have to do eveything
    * with pointers to NameExpr instead of actual variales.
    */
-  private Boolean inParBlock = false;
+  private Boolean inParallel = false;
   /**
    * Keeps track of the current function we are inside of. This is done for ParBlock
    * uses this to generate the name of our <...>ParBlockStmt<...> function name. see
-   * @parBlockstmtCounts for more info.
+   * @parBlockStmtCounts and @parForStmtCounts for more info.
    */
   private String currentFunction = null;
   /**
    * These two variables are responsible for holding the auto generated functions
-   * created by ParBlocks, one holds the prototypes for the top of the program while the
+   * created by Pars, one holds the prototypes for the top of the program while the
    * other holds the actual declaration. Then at VisitCompilation they are added to our
    * template.
    */
-  private LinkedList<String> parBlockPrototypes = null;
-  private LinkedList<String> parBlockProcs = null;
+  private LinkedList<String> parPrototypes = null;
+  private LinkedList<String> parProcs = null;
 
-  private final String parWsName = "parWs";
+  private final String parWsName = "__parWs";
+  /** The signature for our print function. */
+  public static final String printFunctionName = "println";
 
   private Boolean hasArray = false;
   private int arrayDepth = 0;
@@ -85,9 +95,10 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     this.group = new STGroupFile(grammarStFile);
     //Create hashtables!
     this.parBlockStmtCounts = new Hashtable();
+    this.parForStmtCounts = new Hashtable();
 
-    this.parBlockPrototypes = new LinkedList();
-    this.parBlockProcs = new LinkedList();
+    this.parPrototypes = new LinkedList();
+    this.parProcs = new LinkedList();
     sizePerFunction = null;
 
     return;
@@ -110,9 +121,10 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     this.group = new STGroupFile(grammarStFile);
     //Create hashtables!
     this.parBlockStmtCounts = new Hashtable();
+    this.parForStmtCounts = new Hashtable();
 
-    this.parBlockPrototypes = new LinkedList();
-    this.parBlockProcs = new LinkedList();
+    this.parPrototypes = new LinkedList();
+    this.parProcs = new LinkedList();
     this.sizePerFunction = sizePerFunction;
 
     return;
@@ -157,8 +169,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
   //====================================================================================
   // AltStat
   /**
-   * Alt cases are also nontrivial. Granted, they are not hard. The main layout of any
-   * alt case in CCSP looks like:
+   * Alt cases are also nontrivial. The main layout of any alt case in CCSP looks like:
    * <timerAlt(..) | Alt(..)> //Initialization for Alternate statement.
    * <AltEnableChannel(..) | AltEnableTimer(..) | AltEnableSkip(..)> //Initialization
    *   of all cases that will partake in the alt statement.
@@ -184,10 +195,11 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     //If the alt uses timeout we must use a different function to invoke the alt.
     for(int i = 0; i < count; i++){
       AltCase altCase = altCaseList.getElementN(i);
-      hasTimeout = caseIsTimeout(altCase);
 
-      if(hasTimeout == true)
-        break;
+      if(caseIsTimeout(altCase)){
+	 hasTimeout = true;
+	 break;
+	}
     }
 
     //Create the Alt() and AltWait().
@@ -256,7 +268,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
       String typeName = getCDataType((ae.type).typeName());
 
       if (arrayDepth == 0) {
-        return (T) ("((" + typeName + ")" + myArrayTarget + ".array)[" + myIndex + "]");
+        return (T) ("((" + typeName + ")" + myArrayTarget + "->array)[" + myIndex + "]");
       }
       else {
         arrayName = myArrayTarget;
@@ -265,7 +277,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
         accessTemplate.add("index", myIndex);
         accessTemplate.add("dim", Integer.toString(myDepth));
 
-        return (T) ("((" + typeName + ")" + myArrayTarget + ".array)[" + accessTemplate.render());
+        return (T) ("((" + typeName + ")" + myArrayTarget + "->array)[" + accessTemplate.render());
       }
     }
     else {
@@ -311,6 +323,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
       hasArray = true;
       if (as.left() instanceof NameExpr) {
         arrayName = (String) as.left().visit(this);
+        Log.log(arrayName);
         return as.right().visit(this);
       }
       else {
@@ -436,7 +449,6 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     String channel = (String) channelNameExpr.visit(this);
     Type myType = null;
 
-
     //TODO: Clean this mess up.
     if(channelNameExpr.myDecl instanceof LocalDecl)
       //Figure out type of channel and do appropriate code generation based on this.
@@ -524,11 +536,11 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     //to know the name of the last functions.
     for(Type type : typeDecls)
       if (type instanceof ProcTypeDecl){
-        ProcTypeDecl current = (ProcTypeDecl)type;
-        String prototypeName = getPrototypeString(current);
+        ProcTypeDecl myProc = (ProcTypeDecl)type;
+        String prototypeName = getPrototypeString(myProc);
 
         prototypes.add(prototypeName);
-        String name = current.name().getname();
+        String name = makeFunctionName(myProc);
 
         this.lastFunction = name;
       }
@@ -546,9 +558,9 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     //ProcessJ is set so the last function in the file is called as the main,
     //we do that here by specifiying which function to call.
     template.add("functionToCall", lastFunction);
-    template.add("parBlockPrototypes", parBlockPrototypes);
+    template.add("parPrototypes", parPrototypes);
     template.add("stackSize", stackSize);
-    template.add("parBlockProcs", parBlockProcs);
+    template.add("parProcs", parProcs);
 
     if (hasArray == true)
       template.add("hasArray", "true");
@@ -583,8 +595,8 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
   //TODO: I think this will crash if we do:
   //  do
   //    <oneStat>
-  //  while(<expr>;
-  //Since this does not return a Strig[]
+  //  while(<expr>);
+  //Since this does not return a String[]
   public T visitDoStat(DoStat ds){
     Log.log(ds.line + ": Visiting a DoStat");
 
@@ -608,26 +620,89 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
   // ExternType
   //====================================================================================
   // ForStat
-  public T visitForStat(ForStat fs){
+  /**
+   * ForStat have two cases:
+   * 1) Normal for loop, this is trivial and exactly like C counterpart.
+   * 2) Par for loop, every statement is excuted in parallel for all possible loop
+   *    iterations.
+   * For the second case we use code similar to the implementation of the ParProc using
+   * a loop as we cannot statically know the iterations of the loop. The logic for
+   * ParBlock is very similar but to avoid overly complicated code we will keep it
+   * separate!
+   */
+  public T visitForStat(ForStat fs){ //TODO: Nested parallel loops??
+    //TODO: Fails for "for loops" with multiple initializers.
     Log.log(fs.line + ": Visiting a ForStat");
-    ST template = group.getInstanceOf("ForStat");
+    boolean isParFor = fs.isPar();
+    
+    //Pick right template based on whether it is parallel or not.
+    ST template = isParFor ? group.getInstanceOf("ParForStat"):
+      group.getInstanceOf("ForStat");
 
     String expr = (String) fs.expr().visit(this);
     Sequence<Statement> init = fs.init();
     Sequence<ExprStat> incr = fs.incr();
+    
     String[] initStr = null;
     String[] incrStr = null;
-    //TODO: Barriers
+    Statement myStat = fs.stats();
+    //Use in case of parallel for! This set contains all the NameExpr for this statement.
+    LinkedList<NameExpr> myNames = null;
+    
 
-    //Depending whether there is curly brackets it may return an array, or maybe just
-    //a single object. So we must check what it actually is!
-    Object stats = fs.stats().visit(this);
+    //If this is a parallel for statement a lot of extra work should be done!
+    if(isParFor == true){      
+      //Visit our NameCollector for our current statement to get all the NameExpr's!
+      myNames = new LinkedList();
+      fs.stats().visit(new NameCollector(myNames));
 
-    if(stats instanceof String[])
-      template.add("stats", (String[]) stats);
-    else
-      template.add("stats", (String) stats);
+      //If we have a barriers then we enroll them here:
+      Sequence<Expression> barriers = fs.barriers();
+      ArrayList<String> barrierInits = null;
+      if(barriers != null)
+	barrierInits = makeBarrierInit(barriers, myNames.size());
 
+      //Create a new function to wrap this ParFor Statement!
+      int functionNumber = incrementEntry(parForStmtCounts, currentFunction);
+      String functionName = currentFunction + "_ParForStmt" + functionNumber;
+      String indexName = "__i";
+      String arrayName = "__functionWsArray";
+
+      //Turn our set into a Sequece so we can pass it to our createParameters function!
+      Sequence<Expression> params = new Sequence();
+      for(NameExpr ne : myNames)
+	params.append(ne);
+      //Create invocations statements and parameters.
+      
+      ArrayList<String> procParams = paramPassingParFor(params, indexName, arrayName);
+      
+      //Now create actual function!
+      parProcs.add( createParProc(functionName, myStat, myNames, false) );
+      parPrototypes.add( getSimplePrototypeString(functionName) );
+      int stackSize = getSizeOfFunction(sizePerFunction, functionName);
+
+      //Divide by four as we want the size in words not bytes.
+      stackSize = (int) Math.ceil(stackSize / 4.0);
+      template.add("stackSize", stackSize);
+      template.add("function", functionName);
+      template.add("workspace", globalWorkspace);
+      template.add("procParams", procParams);
+      template.add("paramNumbers", myNames.size());
+      if(barriers != null)
+	template.add("barrierInits", barrierInits);
+
+    }
+    else{
+      //Depending whether there is curly brackets it may return an array, or maybe just
+      //a single object. So we must check what it actually is!
+      Object stats = fs.stats().visit(this);
+
+      if(stats instanceof String[])
+	template.add("stats", (String[]) stats);
+      else
+	template.add("stats", (String) stats);
+    }
+    
     //Check for null >:(
     if(init != null)
       initStr = (String[]) init.visit(this);
@@ -706,7 +781,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     if(elsePart != null){
       elsePartStr = elsePart.visit(this);
 
-      if(thenPart instanceof String[])
+      if(elsePartStr instanceof String[])
         template.add("elsePart", (String[]) elsePartStr);
       else
         template.add("elsePart", (String) elsePartStr);
@@ -734,30 +809,25 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
    * return nothing! TODO: Why don't we return the argument normally?
    */
   public T visitInvocation(Invocation in){
-    //TODO: things go horribly wrong when doing something like f(g())...
-    //This could probably be fixed by using a temporary variable.
-    Log.log(in.line + ": Visiting Invocation (" + in.procedureName().getname() + ")");
+    //This in not a special call so we use the long name.
+    String functionName = makeFunctionName(in.targetProc);
+    String simpleName = makeFunctionName(in.targetProc);
+    
+    Log.log(in.line + ": Visiting Invocation (" + functionName + ")");
+    ST template = group.getInstanceOf("Invocation");
 
-    String functionName = in.procedureName().getname();
+    //Recursion. Dynamically allocate space for function on the heap and run it through
+    //the CCSP API.
+    if(simpleName.equals(currentFunction))
+      Error.error("Recursion!");
 
     //Print statements are treated differently. TODO: In the future this will change.
-    if(functionName.equals("println"))
+    if(functionName.equals(printFunctionName))
       return (T) createPrintFunction(in);
 
     Sequence<Expression> params = in.params();
-
-    //Get out the type belonging to this function so we know if there is a return value!
-    //TODO This causes NPE.
-    //String returnType = in.targetProc.returnType().typeName();
-    //Boolean hasReturn = returnType.equals("void");
-    //TODO: Finish implemeting type returning. Really tough right now since the type checker
-    //doesn't select the proper function.
-    Boolean hasReturn = false;
-    String correctTemplate = (!hasReturn) ? "InvocationNoReturn" : "InvocationWihReturn";
-
     //Array list for ProcParams for this invocation.
     String[] paramArray = (String[]) params.visit(this);
-    ST template = group.getInstanceOf(correctTemplate);
 
     //Add all our fields to our template!
     template.add("functionName", functionName);
@@ -765,20 +835,28 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     if(paramArray.length != 0)
       template.add("procParams", paramArray);
 
-    //Handle case with return.
-    if(hasReturn == true){
-      //TODO once Typechecker works change to comemented out line.
-      ;//template.add("returnType", returnType);
-    }
-
     return (T) template.render();
   }
   //====================================================================================
   // LocalDecl
   public T visitLocalDecl(LocalDecl ld){
-    Log.log(ld.line + ": Visting LocalDecl (" + ld.type().typeName() + " " + ld.var().name().getname() + ")");
+    Log.log(ld.line + ": Visting LocalDecl (" + ld.type().typeName() + " " +
+	    ld.var().name().getname() + ")");
     //TODO: isConstant ??
     ST template = group.getInstanceOf("LocalDecl");
+    if (ld.type() instanceof ArrayType) {
+      template = group.getInstanceOf("LocalDeclArray");
+      template.add("globalWsName", globalWorkspace);
+      hasArray = true;
+      String name = (String) ld.var().name().visit(this);
+      Expression init = ld.var().init();
+      if (init != null) {
+        String expr = (String) init.visit(this);
+        template.add("expr", expr);
+      }
+      template.add("name", name);
+      return (T) template.render();
+    }
     String var = (String) ld.var().visit(this);
     String typeString= (String) ld.type().visit(this);
 
@@ -787,9 +865,6 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     if(ld.type().isChannelType() == true) {
       template.add("channelPart", createChannelInit(var));
       template.add("type", "Channel");
-    }
-    else if (ld.type().isArrayType() == true) {
-      template.add("type", "ArrayStruct");
     }
     else
       template.add("type", typeString);
@@ -816,7 +891,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     //If we are inside a ParBlock we want to add a *<varName> since we have sent the
     //pointer of this variable. This is done to make sure side effects in statements
     //are applied inside ParBlocks. See @visitParBlock for more information.
-    if(this.inParBlock == true)
+    if(this.inParallel == true)
       return (T) ("(*" + ne.toString() + ")");
 
     return (T) ne.toString();
@@ -869,7 +944,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     String name = pd.name();
     String type;
     if (pd.type() instanceof ArrayType)
-        type = "ArrayStruct";
+        type = "ArrayStruct*";
     else
         type = (String) pd.type().visit(this);
 
@@ -886,13 +961,13 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
    * From here we generate the code inside of the function, all variables are passed
    * as pointers to make sure we capture all side effects.
    */
-  public T visitParBlock(ParBlock pb){ //TODO: Expressions, f(g());
+  public T visitParBlock(ParBlock pb){
     Log.log(pb.line + ": Visiting a ParBlock");
 
     Sequence<Statement> stats = pb.stats();
     //TODO fix this so to make sure it works for nested ParBlocks:
-    Boolean prevInParBlock = inParBlock;
-    this.inParBlock = true;
+    Boolean prevInParBlock = inParallel;
+    this.inParallel = true;
 
     //List containing the variadic parameter part needed for ProcPar().
     ArrayList<String> procParList = new ArrayList();
@@ -915,16 +990,23 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
 
       //Create function to wrap this ParBlock Statement.
       int functionNumber = incrementEntry(this.parBlockStmtCounts, currentFunction);
-      String functionName = currentFunction + "ParBlockStmt" + functionNumber;
+      String functionName = currentFunction + "_ParBlockStmt" + functionNumber;
       //Create invocations statements.
       statList.add( createInvocationPar(functionName, myNames, procParList, i) );
       //Now create actual function!
-      parBlockProcs.add( createParBlockProc(functionName, myStat, myNames) );
+      parProcs.add( createParProc(functionName, myStat, myNames, true) );
 
       //Add this to our ParBlockPrototypes.
-      parBlockPrototypes.add( getSimplePrototypeString(functionName) );
+      parPrototypes.add( getSimplePrototypeString(functionName) );
       i++;
     }
+
+    //If we have a barriers then we enroll them here:
+    Sequence<Expression> barriers = pb.barriers();
+    ArrayList<String> barrierInits = null;
+    if(barriers != null)
+      barrierInits = makeBarrierInit(barriers, stats.size());
+    
     //By now procParList is populated so we may add it to our template.
     procParTemplate.add("paramWorkspaceName", globalWorkspace);
     procParTemplate.add("processNumber", stats.size());
@@ -935,8 +1017,11 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     parBlockTemplate.add("stringStats", statList);
     parBlockTemplate.add("procPar", procParTemplate.render());
 
+    if(barriers != null)
+      parBlockTemplate.add("barrierInits", barrierInits);
+
     //Restore previous state, this matters in nested ParBlocks.
-    this.inParBlock = prevInParBlock;
+    this.inParallel = prevInParBlock;
 
     return (T) parBlockTemplate.render();
   }
@@ -962,13 +1047,16 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
       typeString = "Time";
     if(py.isBooleanType() == true)
       typeString = "bool";
-    //TODO: add Boolean, barrier, timer.
+    if(py.isBarrierType() == true)
+      typeString = "LightProcBarrier";
+    
     return (T) typeString;
   }
   //====================================================================================
   // ProcTypeDecl
   public T visitProcTypeDecl(ProcTypeDecl pd){
-    String name = (String) pd.name().visit(this);
+
+    String name = makeFunctionName(pd);
     Log.log(pd.line + ": Visiting a Proc Type Decl: " + name);
 
     ST template = group.getInstanceOf("ProcTypeDecl");
@@ -976,9 +1064,8 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     Sequence<Modifier> modifiers = pd.modifiers();
     //Set our current function.
     this.currentFunction = name;
-    //All functions are declared void and their return value is returned through
-    //a function parameter. TODO: Why should it be done this way??
-    String returnType = "void";
+    
+    String returnType = (String) pd.returnType().visit(this);
 
     //This is the last function of the program make sure to shutdown Worskpace!
     if(name.equals(lastFunction)){
@@ -1046,9 +1133,24 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     String[] returnArray = new String[se.size()];
 
     //Iterate through all children placing results in array.
-    for (int i = 0; i<se.size(); i++)
-      if (se.child(i) != null)
-        returnArray[i] = (String) se.child(i).visit(this);
+    for (int i = 0; i < se.size(); i++)
+      if (se.child(i) != null){
+	T returnValue = se.child(i).visit(this);
+
+	// There is a special case here where we may have a {...} with code in this
+	// sequence. Then it will return a String[] instead of String. If this happens we
+	// convert the String[] into a single String. So far only the visitBlock causes
+	// this... So we take care of this here.
+	if(returnValue instanceof String[]){
+	  String[] stringArray = (String[]) returnValue;
+	  ST template = group.getInstanceOf("nestedBlock");
+
+	  template.add("array", stringArray);
+	  returnArray[i] = template.render();
+	}
+	else
+	  returnArray[i] = (String) returnValue;
+      }
       else
         returnArray[i] = null;
 
@@ -1113,6 +1215,17 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
   }
   //====================================================================================
   // SyncStat
+  public T visitSyncStat(SyncStat st) {
+    Log.log(st.line + ": Visiting a SyncStat");
+    ST template = group.getInstanceOf("SyncStat");
+
+    String barrier = (String) st.barrier().visit(this);
+
+    template.add("globalWsName", globalWorkspace);
+    template.add("barrierName", barrier);
+    
+    return (T) template.render();
+  }
   //====================================================================================
   // Ternary
   public T visitTernary(Ternary te){
@@ -1205,11 +1318,14 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
    */
   private String getPrototypeString(ProcTypeDecl procedure){
     ST template = group.getInstanceOf("Prototype");
-    String name = procedure.name().getname();
+    String name = makeFunctionName(procedure);
     String[] formals = (String[]) procedure.formalParams().visit(this);
-
+    String type = (String) procedure.returnType().visit(this);
+    
     template.add("name", name);
     template.add("workspace", globalWorkspace);
+    template.add("type", type);
+    
     if(formals.length != 0)
       template.add("formals", formals);
 
@@ -1221,16 +1337,33 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
    * by the equivalent c program. This is used to create all the function protoypes
    * created from a ParBlock.
    * void <name>(Workspace <globalWsName>)
+   * Note: The function is guaranteed to be of return type void as this is what CCSP
+   * requires.
    * @param name: Name of function to create.
    * @return string of our function.
    */
   private String getSimplePrototypeString(String name){
     ST template = group.getInstanceOf("Prototype");
+    String voidString = "void";
 
     template.add("name", name);
     template.add("workspace", this.globalWorkspace);
+    template.add("type", voidString);
 
     return template.render();
+  }
+  //====================================================================================
+  /**
+   * The CCSP API requires us to know the size of the workspace at compile time. For
+   * recursive calls the number of calls cannot be known. Therefore these are allocated
+   * on the heap and called through the CCSP API.
+   */
+  private String createRecusionCall(Invocation in){
+    Log.log(in.line + ": Creating Recusive call for: " +
+	    (String)in.procedureName().visit(this));
+
+    
+    return null;
   }
   //====================================================================================
   /**
@@ -1272,7 +1405,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     if(expr instanceof NameExpr){
       NameExpr ne = (NameExpr)expr;
       Type myType = ne.type;
-      String name = ne.toString();
+      String name = (String) ne.visit(this);
       lst.add(name);
 
       //Go through the possible types picking the format symbol.
@@ -1358,23 +1491,23 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
   //====================================================================================
   /**
    * This is only used for paramater passing to functions inside ParBlocks.
-   * Given a Sequence<Expression> holding the parameters for a function and the name of
-   * our word, it will return the parameters as strings in the following format:
+   * Given a Sequence<Expression> holding the parameters for a function it will return
+   * the parameters as strings in the following format:
    * ProcParam(globalWsName, parWs[i], 0, &a);
    * ProcParam(globalWsName, parWs[i], 1, &b);
    * Where a and b are the paramters that are acutally needed, wordPointer is the name
    * of the "global" Workspace, parWsis the name of that function's workspace and the
    * 0 and 1 are parameter number.
    * @param params: Our Parameters to pass in.
-   * @param index: for our wsName.
+   * @param index: index for our wsName.
    * @return list of our ProcParam statements.
    */
-  private ArrayList<String> createParametersPar(Sequence<Expression> params, int index){
+  private ArrayList<String> paramPassingParBlock(Sequence<Expression> params, int index){
     Log.log("   Creating parameters for ParBlock Statement!");
     ArrayList<String> paramList = new ArrayList();
 
     for(int i = 0; i < params.size(); i++){
-      ST template = group.getInstanceOf("ProcParam");
+      ST template = group.getInstanceOf("ProcParamParBlock");
       template.add("globalWsName", globalWorkspace);
       template.add("parWsName", parWsName);
       template.add("index", index);
@@ -1386,6 +1519,47 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
 
       //For ParBlocks we always want to pass the arguments as pointers.
       template.add("param", "&" + paramAsString);
+      //Create string and add to our list.
+      paramList.add(template.render());
+    }
+
+    return paramList;
+  }
+  //====================================================================================
+    /**
+   * This is only used for paramater passing to functions inside par for.
+   * Given a Sequence<Expression> holding the parameters for a function and the name of
+   * our word, it will return the parameters as strings in the following format:
+   * ProcParam(globalWsName, parWs[i], 0, &a);
+   * ProcParam(globalWsName, parWs[i], 1, &b);
+   * Where a and b are the paramters that are acutally needed, wordPointer is the name
+   * of the "global" Workspace, parWsis the name of that function's workspace and the
+   * 0 and 1 are parameter number.
+   * @param params: Our Parameters to pass in.
+   * @param index: index for our wsName.
+   * @param wsNames: name of workspace to use.
+   * @return list of our ProcParam statements.
+   */
+  private ArrayList<String> paramPassingParFor(Sequence<Expression> params, String index,
+						String wsName){
+    Log.log("   Creating parameters for Par For Statement!");
+    ArrayList<String> paramList = new ArrayList();
+    
+    for(int i = 0; i < params.size(); i++){
+      ST template = group.getInstanceOf("ProcParamParFor");
+      template.add("globalWsName", globalWorkspace);
+      template.add("parWsName", wsName);
+      template.add("index", index);
+      template.add("paramNumber", i);
+
+      //Visit the ith parameters and turn into into an appropriate string.
+      Expression paramExpr = params.getElementN(i);
+      String paramAsString = (String) paramExpr.visit(this);
+
+      //If the argument is being passed then we expect it to not be shared among the
+      //parallel computations. Therefore we pass it by value. Hack: we pass it's
+      //value as a void*...
+      template.add("param", "(void*)" + paramAsString);
       //Create string and add to our list.
       paramList.add(template.render());
     }
@@ -1455,7 +1629,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
 
     //No need for fcounts here as we know every name is guarandteed to be unique, since
     //multiple statements will each get their own number.
-    String wordName = "word" + functionName;
+    String wordName = "word_" + functionName;
 
     //Turn our set into a Sequece so we can pass it to our createParameters function!
     Sequence<Expression> params = new Sequence();
@@ -1465,10 +1639,11 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     //This is needed as we are currently trying to pass in the parameters for our
     //invocation from a ParBlock, but since we are in a ParBlock NameExpr will try
     //appending a "*" to our statements. So we tell it not to.
-    this.inParBlock = false;
+    this.inParallel = false;
     //Array list for ProcParams for this invocation.
-    ArrayList<String> procParams = createParametersPar(params, index);
-    this.inParBlock = true;
+    ArrayList<String> procParams = paramPassingParBlock(params, index);
+
+    this.inParallel = true;
     int stackSize = getSizeOfFunction(sizePerFunction, functionName);
     //Divide by four as we want the size in words not bytes.
     stackSize = (int) Math.ceil(stackSize / 4.0);
@@ -1506,7 +1681,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
    * @param altCase: AltCase to check.
    * @return was this AltCase a timer?
    */
-  boolean caseIsTimeout(AltCase altCase){
+  public static boolean caseIsTimeout(AltCase altCase){
     Statement stmt = altCase.guard().guard();
 
     if(stmt instanceof TimeoutStat)
@@ -1520,7 +1695,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
    * @param altCase: AltCase to check.
    * @return was this AltCase a Skip?
    */
-  boolean caseIsSkip(AltCase altCase){
+  public static boolean caseIsSkip(AltCase altCase){
     Statement stmt = altCase.guard().guard();
 
     if(stmt instanceof SkipStat)
@@ -1534,7 +1709,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
    * @param altCase: AltCase to check.
    * @return was this AltCase a Skip?
    */
-  boolean caseIsChannel(AltCase altCase){
+  public static boolean caseIsChannel(AltCase altCase){
     Statement stmt = altCase.guard().guard();
 
     if(stmt instanceof ExprStat)
@@ -1611,17 +1786,17 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
   }
   //====================================================================================
   /**
-   * Given the function name, a statement, and a list of names which we will turn into
-   * our parameter list in that order, it will create the proper statement wrapped in
+   * Given the function name, statement[s], and a list of names which we will turn into
+   * our parameter list in that order, it will create the proper statement[s] wrapped in
    * a function for the CCSP API to use.
    * @param functionName: name to call our function.
    * @param myStat: Single statement to run in parallel.
    * @param myNames: LinkedList of elements which are our parameters.
    * @return: String with our entire Proc.
    */
-  String createParBlockProc(String functionName, Statement myStat,
-                            LinkedList<NameExpr> myNames){
-    Log.log("   Creating Par Block Proc for Statement named: " + functionName);
+  String createParProc(String functionName, Statement myStat,
+		       LinkedList<NameExpr> myNames, boolean parBlock){
+    Log.log("   Creating Par Proc for Statement named: " + functionName);
     ST template = group.getInstanceOf("ParBlockProc");
     //We will create a sequence of ParamDecl so we can use our already existing
     //createProcGetParams() function.
@@ -1631,11 +1806,15 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
       paramDeclList.append(new ParamDecl(myNameExpr.type, myNameExpr.name(), false));
 
     //Generate strings:
-    String stringStat = (String) myStat.visit(this);
-    ArrayList<String> getParameters = createProcGetParams(paramDeclList, true);
+    Object stats = myStat.visit(this);
+    if(stats instanceof String[])
+	template.add("body", (String[]) stats);
+      else
+	template.add("body", (String) stats);
+
+    ArrayList<String> getParameters = createProcGetParams(paramDeclList, parBlock);
 
     template.add("name", functionName);
-    template.add("body", stringStat);
     template.add("paramWorkspaceName", globalWorkspace);
     template.add("getParameters", getParameters);
 
@@ -1672,4 +1851,57 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
   String getCDataType(String javaType) {
     return javaType.replaceAll("\\[\\]", "") + "*";
   }
+  //====================================================================================
+  /**
+   * To allow for function overloading through type signatures the name of the function
+   * is it's "returnType" + "name" + "signature". This function returns this string given
+   * a ProcTypeDecl.
+   * @param myProc: Procedure to make name for.
+   * @return functionName: String as explained above.
+   */
+  public static String makeFunctionName(ProcTypeDecl myProc){
+    String functionPlainName = (String) myProc.name().getname();
+    
+    //Special case for print!
+    if(functionPlainName.equals("println"))
+       return functionPlainName;
+       
+    //Notice this is not the C equivalent but our actual type! Else we could get char*
+    //in the type!
+    String returnType = myProc.returnType().typeName();
+    String signature = "";
+    Sequence<ParamDecl> myParams = myProc.formalParams();
+
+    //If no parameters...
+    if(myParams.size() == 0)
+      signature = "_V";
+    else
+      for (ParamDecl pd : myParams){
+	Type type = pd.type();
+	//Some types are treated special as their signature is not in the right format.
+	if(type instanceof ChannelEndType){
+	  ChannelEndType ch = (ChannelEndType) type;
+	  signature += "_CH" + ch.baseType().signature() + (ch.isRead() ? "RE" : "WE");
+	}
+	else
+	  signature += "_" + type.signature();
+      }
+
+    return returnType + "_" + functionPlainName + signature;
+  }
+  //====================================================================================
+  ArrayList<String> makeBarrierInit(Sequence<Expression> barriers, int numberOfProcesses){
+    ArrayList<String> barrierInits = new ArrayList();
+    
+    for(Expression barrier : barriers){
+      ST template = group.getInstanceOf("ForEnroll");
+      template.add("globalWsName", globalWorkspace);
+      template.add("barrierName", barrier);
+      template.add("n", numberOfProcesses);
+      barrierInits.add(template.render());
+    }
+
+    return barrierInits;
+  }
+  //====================================================================================
 }
