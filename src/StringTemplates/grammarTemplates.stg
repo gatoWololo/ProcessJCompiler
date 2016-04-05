@@ -6,13 +6,19 @@ Info() ::= <<
 
 
 Compilation(pragmas, packageName, imports, typeDecls, prototypes, parBlockPrototypes,
-  parBlockProcs, functionToCall, stackSize) ::= <<
+  parBlockProcs, functionToCall, stackSize, hasArray) ::= <<
 <! TODO pragmas, packageName, imports !>
 #include \<stdio.h>
 #include \<cif.h>
 #include \<stdbool.h>
 
+<CommentBar()>
+<if(hasArray)>
 #define MAX(X, Y) ((X) > (Y) ? (X) : (Y))
+<ArrayStruct()>
+<CommentBar()>
+<endif>
+
 
 <CommentBar()>
 <if(prototypes)><prototypes; separator = ";\n">;<endif>
@@ -41,7 +47,6 @@ Compilation(pragmas, packageName, imports, typeDecls, prototypes, parBlockProtot
 Assignment(left, right, op) ::= <<
 (<left> <op> <right>)
 >>
-
 
 BinaryExpr(left, right, op) ::= "(<left> <op> <right>)"
 
@@ -207,6 +212,13 @@ Var(name, init) ::= "<name><if(init)> = <init><endif>"
 
 CommentBar() ::= "/*======================================================================================*/"
 
+ArrayStruct() ::= <<
+typedef struct {
+  void* array;
+  int* dimensions;
+  int numDim;
+} ArrayStruct;
+>>
 
 CMainFunction(functionToCall, stackSize) ::= <<
 int main(int argc, char** argv){
@@ -321,7 +333,18 @@ case <number>:
 
 AltEnd(globalWsName) ::= "AltEnd( <globalWsName> )"
 
-NewArray(globalWsName, type, size) ::= "(<type>*) MAlloc(<globalWsName>, MAX((sizeof(<type>) * <size>) / 4, 1))"
+SetArrayDimensions(name, num, expr) ::= "<name>.dimensions[<num>] = <expr>"
+
+SetArraySize(name, size) ::= "<name>.numDim = <size>"
+
+NewArray(globalWsName, name, type, numDim, size, dimensionList) ::= <<
+<name>.array = (<type>*) MAlloc(<globalWsName>, MAX((sizeof(<type>) * <size>) / 4, 1));
+<name>.numDim = <numDim>;
+<name>.dimensions = (int*) MAlloc(<globalWsName>, (sizeof(int) * <numDim>) / 4);
+<dimensionList; separator = ";\n">
+>>
+
+ArrayAccess(name, index, dim) ::= "(<index> * <name>.dimensions[<name>.numDim - 1 - <dim>])"
 
 ParamDecl(type, name) ::= "<type> <name>"
 

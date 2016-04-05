@@ -64,6 +64,10 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
 
   private final String parWsName = "parWs";
 
+  private Boolean hasArray = false;
+  private int arrayDepth = 0;
+  private String arrayName = "";
+
   /** This table is used to allocate the stack size needed per function. */
   Hashtable<String, Integer> sizePerFunction;
   //====================================================================================
@@ -242,10 +246,48 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
 
   public T visitArrayAccessExpr(ArrayAccessExpr ae) {
     Log.log(ae.line + ": Visiting an ArrayAccessExpr!");
-    String myArrayTarget = (String)ae.target().visit(this);
-    String myIndex = (String)ae.index().visit(this);
+    ST accessTemplate = group.getInstanceOf("ArrayAccess");
+    int myDepth;
 
-    return (T) ("(" + myArrayTarget + "[" + myIndex + "])");
+    // top level array access
+    if ((ae.target() instanceof NameExpr)) {
+      String myArrayTarget = (String)ae.target().visit(this);
+      String myIndex = (String)ae.index().visit(this);
+      String typeName = getCDataType((ae.type).typeName());
+
+      if (arrayDepth == 0) {
+        return (T) ("((" + typeName + ")" + myArrayTarget + ".array)[" + myIndex + "]");
+      }
+      else {
+        arrayName = myArrayTarget;
+        myDepth = arrayDepth;
+        accessTemplate.add("name", myArrayTarget);
+        accessTemplate.add("index", myIndex);
+        accessTemplate.add("dim", Integer.toString(myDepth));
+
+        return (T) ("((" + typeName + ")" + myArrayTarget + ".array)[" + accessTemplate.render());
+      }
+    }
+    else {
+      if (arrayDepth == 0) {
+        arrayDepth += 1;
+        String myArrayTarget = (String)ae.target().visit(this);
+        String myIndex = (String)ae.index().visit(this);
+        arrayDepth = 0;
+
+        return (T) (myArrayTarget + " + " + myIndex + "]");
+      }
+      else {
+        myDepth = arrayDepth;
+        arrayDepth += 1;
+        String myArrayTarget = (String)ae.target().visit(this);
+        String myIndex = (String)ae.index().visit(this);
+        accessTemplate.add("name", arrayName);
+        accessTemplate.add("index", myIndex);
+        accessTemplate.add("dim", myDepth);
+        return (T) (myArrayTarget + " + " + accessTemplate.render());
+      }
+    }
   }
 
   //====================================================================================
@@ -256,7 +298,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
   public T visitArrayType(ArrayType at) {
     Log.log(at.line + ": Visiting an ArrayType!");
     String baseType = (String)at.baseType().visit(this);
-    return (T) (baseType + "*");
+    return (T) (baseType);
   }
 
   //====================================================================================
@@ -264,6 +306,18 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
   public T visitAssignment(Assignment as){
     Log.log(as.line + ": Visiting an Assignment");
     ST template = group.getInstanceOf("Assignment");
+
+    if (as.right() instanceof NewArray) {
+      hasArray = true;
+      if (as.left() instanceof NameExpr) {
+        arrayName = (String) as.left().visit(this);
+        return as.right().visit(this);
+      }
+      else {
+        // TODO: Extend NewArray to record_access and array_access
+        Error.error("Cannot assign new array to non NameExpr, it is not supported at this time");
+      }
+    }
 
     String left = (String) as.left().visit(this);
     String right = (String) as.right().visit(this);
@@ -496,6 +550,9 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     template.add("stackSize", stackSize);
     template.add("parBlockProcs", parBlockProcs);
 
+    if (hasArray == true)
+      template.add("hasArray", "true");
+
     //Finally write the output to a file
     String finalOutput = template.render();
     writeToFile(finalOutput);
@@ -727,9 +784,12 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
 
     //Channels require an initialization and we treat the type different when we are
     //inside a local declr.
-    if(ld.type().isChannelType() == true){
-          template.add("channelPart", createChannelInit(var));
-          template.add("type", "Channel");
+    if(ld.type().isChannelType() == true) {
+      template.add("channelPart", createChannelInit(var));
+      template.add("type", "Channel");
+    }
+    else if (ld.type().isArrayType() == true) {
+      template.add("type", "ArrayStruct");
     }
     else
       template.add("type", typeString);
@@ -772,10 +832,27 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     Sequence<Expression> sizeExp = ne.dimsExpr();
     // TODO: Expand to n-dimensional arrays
     String[] sizeString = (String[])sizeExp.visit(this);
+    String[] dimAllocations = new String[sizeString.length];
+
+    String numDim = Integer.toString(sizeString.length);
+
+    String allocateString = "1";
+    for (int i = 0; i < sizeString.length; i++) {
+      ST setDimTemplate = group.getInstanceOf("SetArrayDimensions");
+      String size = sizeString[i];
+      setDimTemplate.add("name", arrayName);
+      setDimTemplate.add("num", Integer.toString(i));
+      setDimTemplate.add("expr", size);
+      dimAllocations[i] = (String) setDimTemplate.render();
+      allocateString += " * " + size;
+    }
 
     template.add("globalWsName", globalWorkspace);
     template.add("type", myType);
-    template.add("size", sizeString[0]);
+    template.add("name", arrayName);
+    template.add("numDim", numDim);
+    template.add("size", allocateString);
+    template.add("dimensionList", dimAllocations);
 
     return (T) template.render();
   }
@@ -790,7 +867,11 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
 
     ST template = group.getInstanceOf("ParamDecl");
     String name = pd.name();
-    String type = (String) pd.type().visit(this);
+    String type;
+    if (pd.type() instanceof ArrayType)
+        type = "ArrayStruct";
+    else
+        type = (String) pd.type().visit(this);
 
     template.add("name", name);
     template.add("type", type);
@@ -1582,4 +1663,13 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     return table.get(functionName);
   }
   //====================================================================================
+  /**
+   * Given a string of Java data type, it returns a string of the equivalent C data type.
+   * This is for compiler time casting of arrays. TODO expand to all data types that need conversion
+   * @param typeName: the string name of the java type
+   * @return: String of the C data type
+   */
+  String getCDataType(String javaType) {
+    return javaType.replaceAll("\\[\\]", "") + "*";
+  }
 }
