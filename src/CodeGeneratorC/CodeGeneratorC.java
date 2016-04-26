@@ -319,6 +319,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     Log.log(as.line + ": Visiting an Assignment");
     ST template = group.getInstanceOf("Assignment");
 
+    // Handle Array
     if (as.right() instanceof NewArray) {
       hasArray = true;
       if (as.left() instanceof NameExpr) {
@@ -330,6 +331,17 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
         // TODO: Extend NewArray to record_access and array_access
         Error.error("Cannot assign new array to non NameExpr, it is not supported at this time");
       }
+    }
+    // Handle String Literal
+    if (as.type instanceof PrimitiveType && ((PrimitiveType) as.type).isStringType() && as.right() instanceof PrimitiveLiteral) {
+        String varName = (String) as.left().visit(this);
+        String stringExpr = (String) as.right().visit(this);
+        ST literalTemplate = group.getInstanceOf("StringLiteral");
+        literalTemplate.add("globalWsName", globalWorkspace);
+        literalTemplate.add("var", varName);
+        literalTemplate.add("flag", "");
+        literalTemplate.add("string", stringExpr);
+        return (T) literalTemplate.render();
     }
 
     String left = (String) as.left().visit(this);
@@ -353,6 +365,13 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     String op = (String) be.opString();
 
     //TODO: Add suport for string concatanation here.
+    if (op.equals("+") && be.type instanceof PrimitiveType && ((PrimitiveType) be.type).isStringType()) {
+        template = group.getInstanceOf("StringCat");
+        template.add("globalWsName", globalWorkspace);
+        template.add("s1", left);
+        template.add("s2", right);
+        return (T) template.render();
+    }
 
     template.add("left",left);
     template.add("right",right);
@@ -552,6 +571,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
     //Divide by four as we want the size in words not bytes.
     stackSize = (int) Math.ceil(stackSize / 4.0);
 
+    template.add("globalWsName", globalWorkspace);
     //This is where functions are created as they are procedure type.
     template.add("prototypes", prototypes);
     template.add("typeDecls", typeDeclsStr);
@@ -857,8 +877,21 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
       template.add("name", name);
       return (T) template.render();
     }
+
+    Expression init = ld.var().init();
+
+    // Special case for string literal assignment
+    if (ld.type() instanceof PrimitiveType && ((PrimitiveType) ld.type()).isStringType() && init != null && init instanceof PrimitiveLiteral) {
+        ST literalTemplate = group.getInstanceOf("StringLiteral");
+        String var = ld.var().name().getname();
+        String stringLiteral = (String) init.visit(this);
+        literalTemplate.add("globalWsName", globalWorkspace);
+        literalTemplate.add("var", var);
+        literalTemplate.add("string", stringLiteral);
+        return (T) literalTemplate.render();
+    }
     String var = (String) ld.var().visit(this);
-    String typeString= (String) ld.type().visit(this);
+    String typeString = (String) ld.type().visit(this);
 
     //Channels require an initialization and we treat the type different when we are
     //inside a local declr.
@@ -1098,7 +1131,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
   //====================================================================================
   // RecordLiteral
   //====================================================================================
-  // RecordMembero
+  // RecordMember
   //====================================================================================
   // RecordTypeDecl
   //====================================================================================
@@ -1795,7 +1828,7 @@ public class CodeGeneratorC <T extends Object> extends Visitor<T> {
    * @return: String with our entire Proc.
    */
   String createParProc(String functionName, Statement myStat,
-		       LinkedList<NameExpr> myNames, boolean parBlock){
+          LinkedList<NameExpr> myNames, boolean parBlock){
     Log.log("   Creating Par Proc for Statement named: " + functionName);
     ST template = group.getInstanceOf("ParBlockProc");
     //We will create a sequence of ParamDecl so we can use our already existing

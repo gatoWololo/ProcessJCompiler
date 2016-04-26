@@ -6,17 +6,20 @@ Info() ::= <<
 
 
 Compilation(pragmas, packageName, imports, typeDecls, prototypes, parPrototypes,
-  parProcs, functionToCall, stackSize, hasArray) ::= <<
+  parProcs, functionToCall, stackSize, hasArray, globalWsName) ::= <<
 <! TODO pragmas, packageName, imports !>
 #include \<stdio.h>
 #include \<cif.h>
 #include \<stdbool.h>
+#include \<string.h>
 
 <CommentBar()>
 <if(hasArray)>
 <ArrayStruct()>
 <CommentBar()>
 <endif>
+
+<ConcatFunction(globalWsName)>
 
 
 <CommentBar()>
@@ -250,7 +253,6 @@ while( <expr> ) {
 }
 >>
 
-
 Var(name, init) ::= "<name><if(init)> = <init><endif>"
 
 
@@ -262,6 +264,16 @@ typedef struct {
   int* dimensions;
   int numDim;
 } ArrayStruct;
+>>
+
+ConcatFunction(globalWsName) ::= <<
+char* __concatStrings(Workspace <globalWsName>, char* s1, char* s2) {
+    char* temp = (char*) MAlloc(<globalWsName>, sizeof(char) * (strlen(s1) + strlen(s2) + 1));
+    ExternalCallN(strcpy, 2, temp, "");
+    ExternalCallN(strcat, 2, temp, s1);
+    ExternalCallN(strcat, 2, temp, s2);
+    return temp;
+}
 >>
 
 CMainFunction(functionToCall, stackSize) ::= <<
@@ -397,7 +409,18 @@ NewArray(globalWsName, name, type, numDim, size, dimensionList) ::= <<
 <dimensionList; separator = ";\n">
 >>
 
+
 ArrayAccess(name, index, dim) ::= "(<index> * <name>->dimensions[<name>->numDim - 1 - <dim>])"
+
+
+StringLiteral(globalWsName, string, var) ::= <<
+char* <var> = (char*) MAlloc(<globalWsName>, sizeof(char) * (strlen(<string>) + 1));
+ExternalCallN(strcpy, 2, <var>, <string>)
+>>
+
+
+StringCat(globalWsName, s1, s2) ::= "__concatStrings(<globalWsName>, <s1>, <s2>)"
+
 
 ParamDecl(type, name) ::= "<type> <name>"
 
